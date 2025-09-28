@@ -1,0 +1,6 @@
+node_modules
+test-video.mp4
+long-test-video.mp4
+*.log
+.git
+.gitignore
