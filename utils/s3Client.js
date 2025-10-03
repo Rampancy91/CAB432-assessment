@@ -1,12 +1,31 @@
-const { S3Client } = require('@aws-sdk/client-s3');
+const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+const { DynamoDBDocumentClient } = require('@aws-sdk/lib-dynamodb');
 
-// S3 client configuration
-const s3Client = new S3Client({ 
-    region: process.env.AWS_REGION || 'ap-southeast-2',
-    // For local development, AWS SDK will use your local credentials
-    // On EC2, it will automatically use the IAM role
+const client = new DynamoDBClient({
+    region: process.env.AWS_REGION || 'ap-southeast-2'
 });
 
-const BUCKET_NAME = process.env.S3_BUCKET_NAME || 'cab432-video-processor-n11676795';
+const docClient = DynamoDBDocumentClient.from(client);
 
-module.exports = { s3Client, BUCKET_NAME };
+const VIDEOS_TABLE = process.env.VIDEOS_TABLE || 'CAB432-Videos-n11676795';
+const JOBS_TABLE = process.env.JOBS_TABLE || 'CAB432-ProcessingJobs-n11676795';
+
+// Export both old and new formats for compatibility
+function getDocClient() {
+    return docClient;
+}
+
+function getTablesNames() {
+    return {
+        videosTable: VIDEOS_TABLE,
+        jobsTable: JOBS_TABLE
+    };
+}
+
+module.exports = { 
+    docClient,          // Old export
+    VIDEOS_TABLE,       // Old export
+    JOBS_TABLE,         // Old export
+    getDocClient,       // New export (function)
+    getTablesNames      // New export (function)
+};
