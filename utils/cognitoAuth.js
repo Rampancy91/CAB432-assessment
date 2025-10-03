@@ -6,10 +6,11 @@ const {
 } = require('@aws-sdk/client-cognito-identity-provider');
 const crypto = require('crypto');
 
-const USER_POOL_ID = 'ap-southeast-2_PJpxeKlYZ';
-const CLIENT_ID = '4v2r77jcbcajkofgd9pd1dgmnf';
-const CLIENT_SECRET = '1gihno0l9ujpe56sb62c1ham8i33j92egnakugvrtt5jj7if37qs';
-const REGION = 'ap-southeast-2';
+// Load from environment variables (set by app.js from Parameter Store/Secrets Manager)
+const USER_POOL_ID = process.env.COGNITO_USER_POOL_ID || 'ap-southeast-2_PJpxeKlYZ';
+const CLIENT_ID = process.env.COGNITO_CLIENT_ID || '4v2r77jcbcajkofgd9pd1dgmnf';
+const CLIENT_SECRET = process.env.COGNITO_CLIENT_SECRET || '1gihno0l9ujpe56sb62c1ham8i33j92egnakugvrtt5jj7if37qs';
+const REGION = process.env.AWS_REGION || 'ap-southeast-2';
 
 const client = new CognitoIdentityProviderClient({ region: REGION });
 

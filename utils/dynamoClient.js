@@ -17,8 +17,8 @@ function getDocClient() {
 
 function getTablesNames() {
     return {
-        videosTable: VIDEOS_TABLE,
-        jobsTable: JOBS_TABLE
+        VIDEOS_TABLE: VIDEOS_TABLE,  
+        JOBS_TABLE: JOBS_TABLE        
     };
 }
 

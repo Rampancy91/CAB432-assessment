@@ -45,31 +45,40 @@ async function getSecret(secretId) {
 
 // Load AWS configuration
 async function loadAWSConfig() {
-    console.log('🔧 Loading configuration from AWS...');
+    console.log('Loading configuration from AWS...');
     
     try {
-        // Load from Parameter Store
+        // Load Cognito configuration
         const cognitoClientId = await getParameter('/n11676795/video-processor/cognito-client-id');
-        console.log('✅ Loaded Cognito Client ID from Parameter Store');
-        
-        // Load from Secrets Manager
+        const cognitoUserPoolId = await getParameter('/n11676795/video-processor/cognito-user-pool-id');
         const secrets = await getSecret('n11676795/video-processor/client-secret');
         const cognitoClientSecret = secrets.client_secret;
-        console.log('✅ Loaded Cognito Client Secret from Secrets Manager');
+        
+        // Load S3 and DynamoDB configuration
+        const s3Bucket = await getParameter('/n11676795/video-processor/s3-bucket');
+        const videosTable = await getParameter('/n11676795/video-processor/videos-table');
+        const jobsTable = await getParameter('/n11676795/video-processor/jobs-table');
         
         // Store in environment variables for use by routes
         process.env.COGNITO_CLIENT_ID = cognitoClientId;
         process.env.COGNITO_CLIENT_SECRET = cognitoClientSecret;
-        process.env.COGNITO_USER_POOL_ID = process.env.COGNITO_USER_POOL_ID || 'ap-southeast-2_PJpxeKlYZ';
+        process.env.COGNITO_USER_POOL_ID = cognitoUserPoolId;
+        process.env.S3_BUCKET_NAME = s3Bucket;
+        process.env.VIDEOS_TABLE = videosTable;
+        process.env.JOBS_TABLE = jobsTable;
         
-        console.log('✅ Configuration loaded successfully');
-        console.log(`   - Client ID: ${cognitoClientId}`);
-        console.log(`   - Client Secret: ${'*'.repeat(cognitoClientSecret.length)} (hidden)`);
+        console.log('Configuration loaded successfully from AWS');
+        console.log(`  S3 Bucket: ${s3Bucket}`);
+        console.log(`  Videos Table: ${videosTable}`);
+        console.log(`  Jobs Table: ${jobsTable}`);
+        console.log(`  Cognito User Pool: ${cognitoUserPoolId}`);
+        console.log(`  Cognito Client ID: ${cognitoClientId}`);
+        console.log(`  Client Secret: ${'*'.repeat(cognitoClientSecret.length)} (hidden)`);
         
         return true;
     } catch (error) {
-        console.error('❌ Failed to load AWS configuration:', error);
-        console.log('⚠️  Falling back to environment variables from .env file');
+        console.error('Failed to load AWS configuration:', error);
+        console.log('Falling back to environment variables from .env file');
         return false;
     }
 }
@@ -132,9 +141,9 @@ async function startApp() {
     });
 
     app.listen(PORT, '0.0.0.0', () => {
-        console.log(`✅ Server running on port ${PORT}`);
-        console.log(`📍 Access at: http://54.153.171.61:${PORT}`);
-        console.log(`🔍 Health check: http://54.153.171.61:${PORT}/health`);
+        console.log(`Server running on port ${PORT}`);
+        console.log(`Access at: http://54.153.171.61:${PORT}`);
+        console.log(`Health check: http://54.153.171.61:${PORT}/health`);
     });
 }
 
