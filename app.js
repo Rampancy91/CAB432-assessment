@@ -1,13 +1,12 @@
 require('dotenv').config();
 const express = require('express');
-const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 
 // Import routes
 const { router: authRoutes } = require('./routes/auth');
-const { router: videoRoutes } = require('./routes/videos');
+const videoRoutes = require('./routes/videos');
 const processRoutes = require('./routes/process');
 
 const app = express();
