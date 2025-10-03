@@ -1,73 +1,134 @@
 const express = require('express');
 const ffmpeg = require('fluent-ffmpeg');
+const fs = require('fs').promises;
+const fsSync = require('fs');
 const path = require('path');
-const fs = require('fs');
+const { GetObjectCommand, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { s3Client, BUCKET_NAME } = require('../utils/s3Client');
 const { verifyToken } = require('./auth');
 const { videos } = require('./videos');
 
 const router = express.Router();
 
-// In-memory job storage (in real app, this would be a database)
 let processingJobs = [];
 let jobIdCounter = 1;
 
-// CPU-intensive processing function
-const transcodeVideo = (inputPath, outputPath, options, jobId) => {
+// Download from S3 to temp file
+async function downloadFromS3(s3Key, localPath) {
+    const command = new GetObjectCommand({
+        Bucket: BUCKET_NAME,
+        Key: s3Key
+    });
+    
+    const response = await s3Client.send(command);
+    const stream = response.Body;
+    
     return new Promise((resolve, reject) => {
-        console.log(`Starting transcoding job ${jobId}: ${inputPath} -> ${outputPath}`);
-        
+        const writeStream = fsSync.createWriteStream(localPath);
+        stream.pipe(writeStream);
+        stream.on('error', reject);
+        writeStream.on('finish', resolve);
+        writeStream.on('error', reject);
+    });
+}
+
+// Upload to S3 from temp file
+async function uploadToS3(localPath, s3Key) {
+    const fileContent = await fs.readFile(localPath);
+    
+    const command = new PutObjectCommand({
+        Bucket: BUCKET_NAME,
+        Key: s3Key,
+        Body: fileContent,
+        ContentType: 'video/mp4'
+    });
+    
+    await s3Client.send(command);
+}
+
+// CPU-intensive processing function
+const transcodeVideo = async (s3InputKey, s3OutputKey, options, jobId) => {
+    const tempDir = '/tmp';
+    const tempInputPath = path.join(tempDir, `input-${jobId}.mp4`);
+    const tempOutputPath = path.join(tempDir, `output-${jobId}.mp4`);
+
+    try {
+        console.log(`Job ${jobId}: Downloading from S3...`);
+        await downloadFromS3(s3InputKey, tempInputPath);
+
+        console.log(`Job ${jobId}: Starting transcoding...`);
         const job = processingJobs.find(j => j.id === jobId);
         if (job) job.status = 'processing';
 
-        const command = ffmpeg(inputPath)
-            .videoCodec(options.videoCodec || 'libx264')
-            .audioCodec(options.audioCodec || 'aac')
-            .size(options.resolution || '720x480')
-            .videoBitrate(options.videoBitrate || '1000k')
-            .audioBitrate(options.audioBitrate || '128k')
-            .fps(options.fps || 30)
-            .output(outputPath);
+        await new Promise((resolve, reject) => {
+            const command = ffmpeg(tempInputPath)
+                .videoCodec(options.videoCodec || 'libx264')
+                .audioCodec(options.audioCodec || 'aac')
+                .size(options.resolution || '720x480')
+                .videoBitrate(options.videoBitrate || '1000k')
+                .audioBitrate(options.audioBitrate || '128k')
+                .fps(options.fps || 30)
+                .output(tempOutputPath);
 
-        // Add CPU-intensive settings for better load testing
-        if (options.preset) {
-            command.addOption('-preset', options.preset); // 'slow' or 'veryslow' for more CPU usage
-        }
-        if (options.crf) {
-            command.addOption('-crf', options.crf); // Lower values = higher quality = more CPU usage
+            if (options.preset) {
+                command.addOption('-preset', options.preset);
+            }
+            if (options.crf) {
+                command.addOption('-crf', options.crf);
+            }
+
+            command
+                .on('start', (commandLine) => {
+                    console.log(`Job ${jobId}: FFmpeg command: ${commandLine}`);
+                    if (job) job.startedAt = new Date();
+                })
+                .on('progress', (progress) => {
+                    console.log(`Job ${jobId}: ${progress.percent}%`);
+                    if (job) {
+                        job.progress = Math.round(progress.percent) || 0;
+                        job.timeProcessed = progress.timemark;
+                    }
+                })
+                .on('end', () => {
+                    console.log(`Job ${jobId}: Transcoding completed`);
+                    resolve();
+                })
+                .on('error', (err) => {
+                    console.error(`Job ${jobId}: FFmpeg error:`, err.message);
+                    reject(err);
+                })
+                .run();
+        });
+
+        console.log(`Job ${jobId}: Uploading to S3...`);
+        await uploadToS3(tempOutputPath, s3OutputKey);
+
+        // Cleanup temp files
+        await fs.unlink(tempInputPath).catch(() => {});
+        await fs.unlink(tempOutputPath).catch(() => {});
+
+        if (job) {
+            job.status = 'completed';
+            job.completedAt = new Date();
+            job.progress = 100;
         }
 
-        command
-            .on('start', (commandLine) => {
-                console.log('FFmpeg command: ' + commandLine);
-                if (job) job.startedAt = new Date();
-            })
-            .on('progress', (progress) => {
-                console.log(`Job ${jobId} progress: ${progress.percent}%`);
-                if (job) {
-                    job.progress = Math.round(progress.percent) || 0;
-                    job.timeProcessed = progress.timemark;
-                }
-            })
-            .on('end', () => {
-                console.log(`Job ${jobId} completed successfully`);
-                if (job) {
-                    job.status = 'completed';
-                    job.completedAt = new Date();
-                    job.progress = 100;
-                }
-                resolve({ success: true, outputPath });
-            })
-            .on('error', (err) => {
-                console.error(`Job ${jobId} failed:`, err.message);
-                if (job) {
-                    job.status = 'failed';
-                    job.error = err.message;
-                    job.failedAt = new Date();
-                }
-                reject(err);
-            })
-            .run();
-    });
+        return { success: true, s3Key: s3OutputKey };
+
+    } catch (error) {
+        // Cleanup on error
+        await fs.unlink(tempInputPath).catch(() => {});
+        await fs.unlink(tempOutputPath).catch(() => {});
+
+        const job = processingJobs.find(j => j.id === jobId);
+        if (job) {
+            job.status = 'failed';
+            job.error = error.message;
+            job.failedAt = new Date();
+        }
+
+        throw error;
+    }
 };
 
 // Start video processing
@@ -80,7 +141,6 @@ router.post('/transcode/:videoId', verifyToken, async (req, res) => {
             return res.status(404).json({ error: 'Video not found' });
         }
 
-        // Check permissions
         if (video.userId !== req.user.userId && req.user.role !== 'admin') {
             return res.status(403).json({ error: 'Access denied' });
         }
@@ -91,22 +151,20 @@ router.post('/transcode/:videoId', verifyToken, async (req, res) => {
             audioCodec = 'aac',
             videoBitrate = '1000k',
             audioBitrate = '128k',
-            preset = 'slow', // slow/veryslow for more CPU usage
-            crf = '23', // Lower = higher quality = more CPU
+            preset = 'slow',
+            crf = '23',
             fps = 30
         } = req.body;
 
-        // Create processing job
         const jobId = jobIdCounter++;
-        const outputFilename = `processed_${jobId}_${Date.now()}.mp4`;
-        const outputPath = path.join('processed', outputFilename);
+        const s3OutputKey = `processed/${req.user.userId}/processed_${jobId}_${Date.now()}.mp4`;
 
         const job = {
             id: jobId,
             videoId: video.id,
             userId: req.user.userId,
-            inputPath: video.path,
-            outputPath: outputPath,
+            s3InputKey: video.s3Key,
+            s3OutputKey: s3OutputKey,
             options: {
                 resolution,
                 videoCodec,
@@ -127,13 +185,12 @@ router.post('/transcode/:videoId', verifyToken, async (req, res) => {
         processingJobs.push(job);
 
         // Start processing asynchronously
-        transcodeVideo(video.path, outputPath, job.options, jobId)
-            .then((result) => {
-                // Add processed version to video metadata
+        transcodeVideo(video.s3Key, s3OutputKey, job.options, jobId)
+            .then(() => {
                 video.processedVersions.push({
                     jobId: jobId,
-                    filename: outputFilename,
-                    path: outputPath,
+                    s3Key: s3OutputKey,
+                    s3Bucket: BUCKET_NAME,
                     options: job.options,
                     createdAt: new Date()
                 });
@@ -164,7 +221,6 @@ router.get('/status/:jobId', verifyToken, (req, res) => {
             return res.status(404).json({ error: 'Job not found' });
         }
 
-        // Check permissions
         if (job.userId !== req.user.userId && req.user.role !== 'admin') {
             return res.status(403).json({ error: 'Access denied' });
         }
@@ -176,7 +232,7 @@ router.get('/status/:jobId', verifyToken, (req, res) => {
     }
 });
 
-// Get all processing jobs for user
+// Get all processing jobs
 router.get('/jobs', verifyToken, (req, res) => {
     try {
         const userJobs = processingJobs.filter(job => 
