@@ -1,63 +1,30 @@
 @baseUrl = http://54.153.171.61:3000
-@token = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjEsInVzZXJuYW1lIjoiYWRtaW4iLCJyb2xlIjoiYWRtaW4iLCJpYXQiOjE3NTk0ODUxODMsImV4cCI6MTc1OTU3MTU4M30.-ucawJmfXCQoU7N-zKVTyjeNJfUuu6jblw0EdILEA04
+@token = 
 
-### Health Check
-GET {{baseUrl}}/
+### Register New User
+POST {{baseUrl}}/api/auth/register
+Content-Type: application/json
 
-### Login as Admin
+{
+    "username": "testuser",
+    "email": "your-email@example.com",
+    "password": "TestPassword123!"
+}
+
+### Confirm Registration (use code from email)
+POST {{baseUrl}}/api/auth/confirm
+Content-Type: application/json
+
+{
+    "username": "testuser",
+    "code": "123456"
+}
+
+### Login with Cognito
 POST {{baseUrl}}/api/auth/login
 Content-Type: application/json
 
 {
-    "username": "admin",
-    "password": "admin123"
+    "username": "testuser",
+    "password": "TestPassword123!"
 }
-
-### Upload Video to S3
-POST {{baseUrl}}/api/videos/upload
-Authorization: Bearer {{token}}
-Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW
-
-------WebKitFormBoundary7MA4YWxkTrZu0gW
-Content-Disposition: form-data; name="video"; filename="s3-test.mp4"
-Content-Type: video/mp4
-
-< ./s3-test.mp4
-------WebKitFormBoundary7MA4YWxkTrZu0gW--
-
-### Get User Videos
-GET {{baseUrl}}/api/videos
-Authorization: Bearer {{token}}
-
-### Start Transcoding (replace VIDEO_ID)
-POST {{baseUrl}}/api/process/transcode/1
-Authorization: Bearer {{token}}
-Content-Type: application/json
-
-{
-    "resolution": "640x480",
-    "preset": "slow",
-    "crf": "23",
-    "videoBitrate": "1000k",
-    "fps": 30
-}
-
-### Check Job Status (replace JOB_ID)
-GET {{baseUrl}}/api/process/status/1
-Authorization: Bearer {{token}}
-
-### Upload Video (stores metadata in DynamoDB)
-POST {{baseUrl}}/api/videos/upload
-Authorization: Bearer {{token}}
-Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW
-
-------WebKitFormBoundary7MA4YWxkTrZu0gW
-Content-Disposition: form-data; name="video"; filename="s3-test.mp4"
-Content-Type: video/mp4
-
-< ./s3-test.mp4
-------WebKitFormBoundary7MA4YWxkTrZu0gW--
-
-### Get Videos (retrieves from DynamoDB)
-GET {{baseUrl}}/api/videos
-Authorization: Bearer {{token}}
