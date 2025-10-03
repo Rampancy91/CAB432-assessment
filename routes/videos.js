@@ -4,11 +4,21 @@ const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const { PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { PutCommand, GetCommand, QueryCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
-const { s3Client, BUCKET_NAME } = require('../utils/s3Client');
-const { docClient, VIDEOS_TABLE } = require('../utils/dynamoClient');
+const { getS3Client, getBucketName } = require('../utils/s3Client');
+const { getDocClient, getTablesNames } = require('../utils/dynamoClient');
 const { verifyToken } = require('./auth');
 
 const router = express.Router();
+
+// Get initialized clients
+const getClients = () => {
+    return {
+        s3Client: getS3Client(),
+        BUCKET_NAME: getBucketName(),
+        docClient: getDocClient(),
+        VIDEOS_TABLE: getTablesNames().VIDEOS_TABLE
+    };
+};
 
 const storage = multer.memoryStorage();
 
@@ -35,6 +45,7 @@ router.post('/upload', verifyToken, upload.single('video'), async (req, res) => 
             return res.status(400).json({ error: 'No video file provided' });
         }
 
+        const { s3Client, BUCKET_NAME, docClient, VIDEOS_TABLE } = getClients();
         const videoId = uuidv4();
         const s3Key = `uploads/${req.user.userId}/${Date.now()}-${Math.round(Math.random() * 1E9)}${path.extname(req.file.originalname)}`;
 
@@ -79,6 +90,7 @@ router.post('/upload', verifyToken, upload.single('video'), async (req, res) => 
 // Get user's videos from DynamoDB
 router.get('/', verifyToken, async (req, res) => {
     try {
+        const { docClient, VIDEOS_TABLE } = getClients();
         const params = {
             TableName: VIDEOS_TABLE,
             IndexName: 'UserIdIndex',
@@ -100,6 +112,7 @@ router.get('/', verifyToken, async (req, res) => {
 // Get specific video from DynamoDB
 router.get('/:videoId', verifyToken, async (req, res) => {
     try {
+        const { docClient, VIDEOS_TABLE } = getClients();
         const result = await docClient.send(new GetCommand({
             TableName: VIDEOS_TABLE,
             Key: { videoId: req.params.videoId }
@@ -125,6 +138,7 @@ router.get('/:videoId', verifyToken, async (req, res) => {
 // Delete video from S3 and DynamoDB
 router.delete('/:videoId', verifyToken, async (req, res) => {
     try {
+        const { s3Client, BUCKET_NAME, docClient, VIDEOS_TABLE } = getClients();
         const result = await docClient.send(new GetCommand({
             TableName: VIDEOS_TABLE,
             Key: { videoId: req.params.videoId }

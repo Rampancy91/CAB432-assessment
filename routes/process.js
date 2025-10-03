@@ -6,16 +6,27 @@ const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const { GetObjectCommand, PutObjectCommand } = require('@aws-sdk/client-s3');
 const { PutCommand, GetCommand, QueryCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
-const { s3Client, BUCKET_NAME } = require('../utils/s3Client');
-const { docClient, VIDEOS_TABLE, JOBS_TABLE } = require('../utils/dynamoClient');
+const { getS3Client, getBucketName } = require('../utils/s3Client');
+const { getDocClient, getTablesNames } = require('../utils/dynamoClient');
 const { verifyToken } = require('./auth');
 
 const router = express.Router();
 
+// Get initialized clients
+const getClients = () => {
+    return {
+        s3Client: getS3Client(),
+        BUCKET_NAME: getBucketName(),
+        docClient: getDocClient(),
+        VIDEOS_TABLE: getTablesNames().VIDEOS_TABLE,
+        JOBS_TABLE: getTablesNames().JOBS_TABLE
+    };
+};
+
 // Download from S3 to temp file
-async function downloadFromS3(s3Key, localPath) {
+async function downloadFromS3(s3Client, bucketName, s3Key, localPath) {
     const command = new GetObjectCommand({
-        Bucket: BUCKET_NAME,
+        Bucket: bucketName,
         Key: s3Key
     });
     
@@ -32,11 +43,11 @@ async function downloadFromS3(s3Key, localPath) {
 }
 
 // Upload to S3 from temp file
-async function uploadToS3(localPath, s3Key) {
+async function uploadToS3(s3Client, bucketName, localPath, s3Key) {
     const fileContent = await fs.readFile(localPath);
     
     const command = new PutObjectCommand({
-        Bucket: BUCKET_NAME,
+        Bucket: bucketName,
         Key: s3Key,
         Body: fileContent,
         ContentType: 'video/mp4'
@@ -46,7 +57,7 @@ async function uploadToS3(localPath, s3Key) {
 }
 
 // Update job status in DynamoDB
-async function updateJobStatus(jobId, updates) {
+async function updateJobStatus(docClient, jobsTable, jobId, updates) {
     const updateExpressions = [];
     const expressionAttributeNames = {};
     const expressionAttributeValues = {};
@@ -62,7 +73,7 @@ async function updateJobStatus(jobId, updates) {
     }
     
     await docClient.send(new UpdateCommand({
-        TableName: JOBS_TABLE,
+        TableName: jobsTable,
         Key: { jobId },
         UpdateExpression: `SET ${updateExpressions.join(', ')}`,
         ExpressionAttributeNames: expressionAttributeNames,
@@ -72,16 +83,17 @@ async function updateJobStatus(jobId, updates) {
 
 // CPU-intensive processing function
 const transcodeVideo = async (s3InputKey, s3OutputKey, options, jobId) => {
+    const { s3Client, BUCKET_NAME, docClient, JOBS_TABLE } = getClients();
     const tempDir = '/tmp';
     const tempInputPath = path.join(tempDir, `input-${jobId}.mp4`);
     const tempOutputPath = path.join(tempDir, `output-${jobId}.mp4`);
 
     try {
         console.log(`Job ${jobId}: Downloading from S3...`);
-        await downloadFromS3(s3InputKey, tempInputPath);
+        await downloadFromS3(s3Client, BUCKET_NAME, s3InputKey, tempInputPath);
 
         console.log(`Job ${jobId}: Starting transcoding...`);
-        await updateJobStatus(jobId, { 
+        await updateJobStatus(docClient, JOBS_TABLE, jobId, { 
             status: 'processing',
             startedAt: new Date().toISOString()
         });
@@ -109,7 +121,7 @@ const transcodeVideo = async (s3InputKey, s3OutputKey, options, jobId) => {
                 })
                 .on('progress', async (progress) => {
                     console.log(`Job ${jobId}: ${progress.percent}%`);
-                    await updateJobStatus(jobId, {
+                    await updateJobStatus(docClient, JOBS_TABLE, jobId, {
                         progress: Math.round(progress.percent) || 0,
                         timeProcessed: progress.timemark || 'N/A'
                     });
@@ -126,13 +138,13 @@ const transcodeVideo = async (s3InputKey, s3OutputKey, options, jobId) => {
         });
 
         console.log(`Job ${jobId}: Uploading to S3...`);
-        await uploadToS3(tempOutputPath, s3OutputKey);
+        await uploadToS3(s3Client, BUCKET_NAME, tempOutputPath, s3OutputKey);
 
         // Cleanup temp files
         await fs.unlink(tempInputPath).catch(() => {});
         await fs.unlink(tempOutputPath).catch(() => {});
 
-        await updateJobStatus(jobId, {
+        await updateJobStatus(docClient, JOBS_TABLE, jobId, {
             status: 'completed',
             completedAt: new Date().toISOString(),
             progress: 100
@@ -145,7 +157,7 @@ const transcodeVideo = async (s3InputKey, s3OutputKey, options, jobId) => {
         await fs.unlink(tempInputPath).catch(() => {});
         await fs.unlink(tempOutputPath).catch(() => {});
 
-        await updateJobStatus(jobId, {
+        await updateJobStatus(docClient, JOBS_TABLE, jobId, {
             status: 'failed',
             error: error.message,
             failedAt: new Date().toISOString()
@@ -158,6 +170,7 @@ const transcodeVideo = async (s3InputKey, s3OutputKey, options, jobId) => {
 // Start video processing
 router.post('/transcode/:videoId', verifyToken, async (req, res) => {
     try {
+        const { docClient, VIDEOS_TABLE, JOBS_TABLE, BUCKET_NAME } = getClients();
         const videoId = req.params.videoId;
         
         // Get video from DynamoDB
@@ -222,6 +235,7 @@ router.post('/transcode/:videoId', verifyToken, async (req, res) => {
         // Start processing asynchronously
         transcodeVideo(video.s3Key, s3OutputKey, job.options, jobId)
             .then(async () => {
+                const { docClient, VIDEOS_TABLE, BUCKET_NAME } = getClients();
                 // Update video with processed version
                 const updatedProcessedVersions = [
                     ...(video.processedVersions || []),
@@ -262,6 +276,7 @@ router.post('/transcode/:videoId', verifyToken, async (req, res) => {
 // Get processing status from DynamoDB
 router.get('/status/:jobId', verifyToken, async (req, res) => {
     try {
+        const { docClient, JOBS_TABLE } = getClients();
         const result = await docClient.send(new GetCommand({
             TableName: JOBS_TABLE,
             Key: { jobId: req.params.jobId }
@@ -287,6 +302,7 @@ router.get('/status/:jobId', verifyToken, async (req, res) => {
 // Get all processing jobs from DynamoDB
 router.get('/jobs', verifyToken, async (req, res) => {
     try {
+        const { docClient, JOBS_TABLE } = getClients();
         const result = await docClient.send(new QueryCommand({
             TableName: JOBS_TABLE,
             IndexName: 'UserIdIndex',
