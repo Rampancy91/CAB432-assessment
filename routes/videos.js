@@ -2,7 +2,8 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
-const { PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { PutObjectCommand, DeleteObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { PutCommand, GetCommand, QueryCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
 const { getS3Client, getBucketName } = require('../utils/s3Client');
 const { getDocClient, getTablesNames } = require('../utils/dynamoClient');
@@ -38,7 +39,118 @@ const upload = multer({
     }
 });
 
-// Upload video to S3 and save metadata to DynamoDB
+// Get pre-signed URL for upload
+router.get('/upload-url', verifyToken, async (req, res) => {
+    try {
+        const { filename, contentType } = req.query;
+        
+        if (!filename || !contentType) {
+            return res.status(400).json({ error: 'filename and contentType required' });
+        }
+
+        const { s3Client, BUCKET_NAME } = getClients();
+        const videoId = uuidv4();
+        const s3Key = `uploads/${req.user.userId}/${Date.now()}-${Math.round(Math.random() * 1E9)}${path.extname(filename)}`;
+
+        const command = new PutObjectCommand({
+            Bucket: BUCKET_NAME,
+            Key: s3Key,
+            ContentType: contentType
+        });
+
+        const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
+
+        res.json({
+            uploadUrl,
+            videoId,
+            s3Key,
+            filename
+        });
+
+    } catch (error) {
+        console.error('Generate upload URL error:', error);
+        res.status(500).json({ error: 'Failed to generate upload URL' });
+    }
+});
+
+// Confirm upload and save metadata
+router.post('/confirm-upload', verifyToken, async (req, res) => {
+    try {
+        const { videoId, s3Key, originalName, size, mimetype } = req.body;
+
+        if (!videoId || !s3Key || !originalName) {
+            return res.status(400).json({ error: 'Missing required fields' });
+        }
+
+        const { docClient, VIDEOS_TABLE, BUCKET_NAME } = getClients();
+
+        const videoMetadata = {
+            videoId,
+            userId: req.user.userId.toString(),
+            originalName,
+            s3Key,
+            s3Bucket: BUCKET_NAME,
+            size: size || 0,
+            mimetype: mimetype || 'video/mp4',
+            uploadedAt: new Date().toISOString(),
+            processedVersions: []
+        };
+
+        await docClient.send(new PutCommand({
+            TableName: VIDEOS_TABLE,
+            Item: videoMetadata
+        }));
+
+        res.json({
+            message: 'Video upload confirmed',
+            video: videoMetadata
+        });
+
+    } catch (error) {
+        console.error('Confirm upload error:', error);
+        res.status(500).json({ error: 'Failed to confirm upload' });
+    }
+});
+
+// Get pre-signed URL for download
+router.get('/:videoId/download-url', verifyToken, async (req, res) => {
+    try {
+        const { s3Client, BUCKET_NAME, docClient, VIDEOS_TABLE } = getClients();
+        
+        const result = await docClient.send(new GetCommand({
+            TableName: VIDEOS_TABLE,
+            Key: { videoId: req.params.videoId }
+        }));
+
+        const video = result.Item;
+
+        if (!video) {
+            return res.status(404).json({ error: 'Video not found' });
+        }
+
+        if (video.userId !== req.user.userId.toString() && req.user.role !== 'admin') {
+            return res.status(403).json({ error: 'Access denied' });
+        }
+
+        const command = new GetObjectCommand({
+            Bucket: BUCKET_NAME,
+            Key: video.s3Key
+        });
+
+        const downloadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
+
+        res.json({
+            downloadUrl,
+            filename: video.originalName
+        });
+
+    } catch (error) {
+        console.error('Generate download URL error:', error);
+        res.status(500).json({ error: 'Failed to generate download URL' });
+    }
+});
+
+// Kept the old upload method for backwards compatibility
 router.post('/upload', verifyToken, upload.single('video'), async (req, res) => {
     try {
         if (!req.file) {
