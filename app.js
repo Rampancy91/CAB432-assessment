@@ -133,8 +133,8 @@ async function startApp() {
 
     app.listen(PORT, '0.0.0.0', () => {
         console.log(`✅ Server running on port ${PORT}`);
-        console.log(`📍 Access at: 54.153.171.61:${PORT}`);
-        console.log(`🔍 Health check: 54.153.171.61:${PORT}/health`);
+        console.log(`📍 Access at: http://54.153.171.61:${PORT}`);
+        console.log(`🔍 Health check: http://54.153.171.61:${PORT}/health`);
     });
 }
 
