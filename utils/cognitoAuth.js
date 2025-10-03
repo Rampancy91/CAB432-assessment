@@ -1,86 +1,70 @@
 const { 
-    CognitoUserPool, 
-    CognitoUser, 
-    AuthenticationDetails,
-    CognitoUserAttribute 
-} = require('amazon-cognito-identity-js');
+    CognitoIdentityProviderClient,
+    SignUpCommand,
+    ConfirmSignUpCommand,
+    InitiateAuthCommand
+} = require('@aws-sdk/client-cognito-identity-provider');
+const crypto = require('crypto');
 
-const poolData = {
-    UserPoolId: process.env.COGNITO_USER_POOL_ID || 'ap-southeast-2_RxwUU6SDz',
-    ClientId: process.env.COGNITO_CLIENT_ID || '33m60gvsfuebp2elkat3hp5dol'
-};
+const USER_POOL_ID = 'ap-southeast-2_PJpxeKlYZ';
+const CLIENT_ID = '4v2r77jcbcajkofgd9pd1dgmnf';
+const CLIENT_SECRET = '1gihno0l9ujpe56sb62c1ham8i33j92egnakugvrtt5jj7if37qs';
+const REGION = 'ap-southeast-2';
 
-const userPool = new CognitoUserPool(poolData);
+const client = new CognitoIdentityProviderClient({ region: REGION });
+
+// Generate SECRET_HASH required for client secret
+function secretHash(username) {
+    const hasher = crypto.createHmac('sha256', CLIENT_SECRET);
+    hasher.update(`${username}${CLIENT_ID}`);
+    return hasher.digest('base64');
+}
 
 // Register new user
-function registerUser(username, email, password) {
-    return new Promise((resolve, reject) => {
-        const attributeList = [
-            new CognitoUserAttribute({
-                Name: 'email',
-                Value: email
-            })
-        ];
-
-        userPool.signUp(username, password, attributeList, null, (err, result) => {
-            if (err) {
-                reject(err);
-                return;
-            }
-            resolve(result.user);
-        });
+async function registerUser(username, email, password) {
+    const command = new SignUpCommand({
+        ClientId: CLIENT_ID,
+        SecretHash: secretHash(username),
+        Username: username,
+        Password: password,
+        UserAttributes: [{ Name: 'email', Value: email }]
     });
+
+    return await client.send(command);
 }
 
-// Confirm user registration with code from email
-function confirmRegistration(username, code) {
-    return new Promise((resolve, reject) => {
-        const cognitoUser = new CognitoUser({
-            Username: username,
-            Pool: userPool
-        });
-
-        cognitoUser.confirmRegistration(code, true, (err, result) => {
-            if (err) {
-                reject(err);
-                return;
-            }
-            resolve(result);
-        });
+// Confirm registration
+async function confirmRegistration(username, code) {
+    const command = new ConfirmSignUpCommand({
+        ClientId: CLIENT_ID,
+        SecretHash: secretHash(username),
+        Username: username,
+        ConfirmationCode: code
     });
+
+    return await client.send(command);
 }
 
-// Login user
-function authenticateUser(username, password) {
-    return new Promise((resolve, reject) => {
-        const authenticationDetails = new AuthenticationDetails({
-            Username: username,
-            Password: password
-        });
-
-        const cognitoUser = new CognitoUser({
-            Username: username,
-            Pool: userPool
-        });
-
-        cognitoUser.authenticateUser(authenticationDetails, {
-            onSuccess: (result) => {
-                resolve({
-                    accessToken: result.getAccessToken().getJwtToken(),
-                    idToken: result.getIdToken().getJwtToken(),
-                    refreshToken: result.getRefreshToken().getToken()
-                });
-            },
-            onFailure: (err) => {
-                reject(err);
-            }
-        });
+// Authenticate user
+async function authenticateUser(username, password) {
+    const command = new InitiateAuthCommand({
+        AuthFlow: 'USER_PASSWORD_AUTH',
+        AuthParameters: {
+            USERNAME: username,
+            PASSWORD: password,
+            SECRET_HASH: secretHash(username)
+        },
+        ClientId: CLIENT_ID
     });
+
+    const response = await client.send(command);
+    return response.AuthenticationResult;
 }
 
 module.exports = {
     registerUser,
     confirmRegistration,
     authenticateUser,
-    userPool
+    USER_POOL_ID,
+    CLIENT_ID
 };

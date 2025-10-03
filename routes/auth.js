@@ -30,7 +30,7 @@ router.post('/register', async (req, res) => {
     }
 });
 
-// Confirm registration with code from email
+// Confirm registration
 router.post('/confirm', async (req, res) => {
     try {
         const { username, code } = req.body;
@@ -69,16 +69,16 @@ router.post('/login', async (req, res) => {
         const tokens = await authenticateUser(username, password);
 
         // Decode the ID token to get user info
-        const decoded = jwt.decode(tokens.idToken);
+        const decoded = jwt.decode(tokens.IdToken);
 
         res.json({
             message: 'Login successful',
-            accessToken: tokens.accessToken,
-            idToken: tokens.idToken,
+            accessToken: tokens.AccessToken,
+            idToken: tokens.IdToken,
             user: {
                 username: decoded['cognito:username'],
                 email: decoded.email,
-                sub: decoded.sub // Cognito user ID
+                sub: decoded.sub
             }
         });
 
@@ -99,19 +99,17 @@ const verifyToken = (req, res, next) => {
     }
 
     try {
-        // Decode without verification
         const decoded = jwt.decode(token);
         
         if (!decoded) {
             return res.status(400).json({ error: 'Invalid token' });
         }
 
-        // Extract user info from Cognito token
         req.user = {
             userId: decoded.sub || decoded['cognito:username'],
             username: decoded['cognito:username'] || decoded.username,
             email: decoded.email,
-            role: 'user' // You can add custom attributes for roles later
+            role: 'user'
         };
         
         next();
