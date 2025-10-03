@@ -6,3 +6,4 @@ uploads/
 processed/
 *.log
 .env
+api.tests.http
