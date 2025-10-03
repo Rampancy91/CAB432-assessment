@@ -3,15 +3,14 @@ const ffmpeg = require('fluent-ffmpeg');
 const fs = require('fs').promises;
 const fsSync = require('fs');
 const path = require('path');
+const { v4: uuidv4 } = require('uuid');
 const { GetObjectCommand, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { PutCommand, GetCommand, QueryCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
 const { s3Client, BUCKET_NAME } = require('../utils/s3Client');
+const { docClient, VIDEOS_TABLE, JOBS_TABLE } = require('../utils/dynamoClient');
 const { verifyToken } = require('./auth');
-const { videos } = require('./videos');
 
 const router = express.Router();
-
-let processingJobs = [];
-let jobIdCounter = 1;
 
 // Download from S3 to temp file
 async function downloadFromS3(s3Key, localPath) {
@@ -46,6 +45,31 @@ async function uploadToS3(localPath, s3Key) {
     await s3Client.send(command);
 }
 
+// Update job status in DynamoDB
+async function updateJobStatus(jobId, updates) {
+    const updateExpressions = [];
+    const expressionAttributeNames = {};
+    const expressionAttributeValues = {};
+    
+    let index = 0;
+    for (const [key, value] of Object.entries(updates)) {
+        const attrName = `#attr${index}`;
+        const attrValue = `:val${index}`;
+        updateExpressions.push(`${attrName} = ${attrValue}`);
+        expressionAttributeNames[attrName] = key;
+        expressionAttributeValues[attrValue] = value;
+        index++;
+    }
+    
+    await docClient.send(new UpdateCommand({
+        TableName: JOBS_TABLE,
+        Key: { jobId },
+        UpdateExpression: `SET ${updateExpressions.join(', ')}`,
+        ExpressionAttributeNames: expressionAttributeNames,
+        ExpressionAttributeValues: expressionAttributeValues
+    }));
+}
+
 // CPU-intensive processing function
 const transcodeVideo = async (s3InputKey, s3OutputKey, options, jobId) => {
     const tempDir = '/tmp';
@@ -57,8 +81,10 @@ const transcodeVideo = async (s3InputKey, s3OutputKey, options, jobId) => {
         await downloadFromS3(s3InputKey, tempInputPath);
 
         console.log(`Job ${jobId}: Starting transcoding...`);
-        const job = processingJobs.find(j => j.id === jobId);
-        if (job) job.status = 'processing';
+        await updateJobStatus(jobId, { 
+            status: 'processing',
+            startedAt: new Date().toISOString()
+        });
 
         await new Promise((resolve, reject) => {
             const command = ffmpeg(tempInputPath)
@@ -80,14 +106,13 @@ const transcodeVideo = async (s3InputKey, s3OutputKey, options, jobId) => {
             command
                 .on('start', (commandLine) => {
                     console.log(`Job ${jobId}: FFmpeg command: ${commandLine}`);
-                    if (job) job.startedAt = new Date();
                 })
-                .on('progress', (progress) => {
+                .on('progress', async (progress) => {
                     console.log(`Job ${jobId}: ${progress.percent}%`);
-                    if (job) {
-                        job.progress = Math.round(progress.percent) || 0;
-                        job.timeProcessed = progress.timemark;
-                    }
+                    await updateJobStatus(jobId, {
+                        progress: Math.round(progress.percent) || 0,
+                        timeProcessed: progress.timemark || 'N/A'
+                    });
                 })
                 .on('end', () => {
                     console.log(`Job ${jobId}: Transcoding completed`);
@@ -107,11 +132,11 @@ const transcodeVideo = async (s3InputKey, s3OutputKey, options, jobId) => {
         await fs.unlink(tempInputPath).catch(() => {});
         await fs.unlink(tempOutputPath).catch(() => {});
 
-        if (job) {
-            job.status = 'completed';
-            job.completedAt = new Date();
-            job.progress = 100;
-        }
+        await updateJobStatus(jobId, {
+            status: 'completed',
+            completedAt: new Date().toISOString(),
+            progress: 100
+        });
 
         return { success: true, s3Key: s3OutputKey };
 
@@ -120,12 +145,11 @@ const transcodeVideo = async (s3InputKey, s3OutputKey, options, jobId) => {
         await fs.unlink(tempInputPath).catch(() => {});
         await fs.unlink(tempOutputPath).catch(() => {});
 
-        const job = processingJobs.find(j => j.id === jobId);
-        if (job) {
-            job.status = 'failed';
-            job.error = error.message;
-            job.failedAt = new Date();
-        }
+        await updateJobStatus(jobId, {
+            status: 'failed',
+            error: error.message,
+            failedAt: new Date().toISOString()
+        });
 
         throw error;
     }
@@ -134,14 +158,21 @@ const transcodeVideo = async (s3InputKey, s3OutputKey, options, jobId) => {
 // Start video processing
 router.post('/transcode/:videoId', verifyToken, async (req, res) => {
     try {
-        const videoId = parseInt(req.params.videoId);
-        const video = videos.find(v => v.id === videoId);
+        const videoId = req.params.videoId;
+        
+        // Get video from DynamoDB
+        const videoResult = await docClient.send(new GetCommand({
+            TableName: VIDEOS_TABLE,
+            Key: { videoId }
+        }));
+
+        const video = videoResult.Item;
 
         if (!video) {
             return res.status(404).json({ error: 'Video not found' });
         }
 
-        if (video.userId !== req.user.userId && req.user.role !== 'admin') {
+        if (video.userId !== req.user.userId.toString() && req.user.role !== 'admin') {
             return res.status(403).json({ error: 'Access denied' });
         }
 
@@ -156,13 +187,13 @@ router.post('/transcode/:videoId', verifyToken, async (req, res) => {
             fps = 30
         } = req.body;
 
-        const jobId = jobIdCounter++;
+        const jobId = uuidv4();
         const s3OutputKey = `processed/${req.user.userId}/processed_${jobId}_${Date.now()}.mp4`;
 
         const job = {
-            id: jobId,
-            videoId: video.id,
-            userId: req.user.userId,
+            jobId: jobId,
+            videoId: video.videoId,
+            userId: req.user.userId.toString(),
             s3InputKey: video.s3Key,
             s3OutputKey: s3OutputKey,
             options: {
@@ -177,23 +208,40 @@ router.post('/transcode/:videoId', verifyToken, async (req, res) => {
             },
             status: 'queued',
             progress: 0,
-            createdAt: new Date(),
+            createdAt: new Date().toISOString(),
             startedAt: null,
             completedAt: null
         };
 
-        processingJobs.push(job);
+        // Save job to DynamoDB
+        await docClient.send(new PutCommand({
+            TableName: JOBS_TABLE,
+            Item: job
+        }));
 
         // Start processing asynchronously
         transcodeVideo(video.s3Key, s3OutputKey, job.options, jobId)
-            .then(() => {
-                video.processedVersions.push({
-                    jobId: jobId,
-                    s3Key: s3OutputKey,
-                    s3Bucket: BUCKET_NAME,
-                    options: job.options,
-                    createdAt: new Date()
-                });
+            .then(async () => {
+                // Update video with processed version
+                const updatedProcessedVersions = [
+                    ...(video.processedVersions || []),
+                    {
+                        jobId: jobId,
+                        s3Key: s3OutputKey,
+                        s3Bucket: BUCKET_NAME,
+                        options: job.options,
+                        createdAt: new Date().toISOString()
+                    }
+                ];
+
+                await docClient.send(new UpdateCommand({
+                    TableName: VIDEOS_TABLE,
+                    Key: { videoId: video.videoId },
+                    UpdateExpression: 'SET processedVersions = :versions',
+                    ExpressionAttributeValues: {
+                        ':versions': updatedProcessedVersions
+                    }
+                }));
             })
             .catch((error) => {
                 console.error('Processing failed:', error);
@@ -211,17 +259,21 @@ router.post('/transcode/:videoId', verifyToken, async (req, res) => {
     }
 });
 
-// Get processing status
-router.get('/status/:jobId', verifyToken, (req, res) => {
+// Get processing status from DynamoDB
+router.get('/status/:jobId', verifyToken, async (req, res) => {
     try {
-        const jobId = parseInt(req.params.jobId);
-        const job = processingJobs.find(j => j.id === jobId);
+        const result = await docClient.send(new GetCommand({
+            TableName: JOBS_TABLE,
+            Key: { jobId: req.params.jobId }
+        }));
+
+        const job = result.Item;
 
         if (!job) {
             return res.status(404).json({ error: 'Job not found' });
         }
 
-        if (job.userId !== req.user.userId && req.user.role !== 'admin') {
+        if (job.userId !== req.user.userId.toString() && req.user.role !== 'admin') {
             return res.status(403).json({ error: 'Access denied' });
         }
 
@@ -232,14 +284,19 @@ router.get('/status/:jobId', verifyToken, (req, res) => {
     }
 });
 
-// Get all processing jobs
-router.get('/jobs', verifyToken, (req, res) => {
+// Get all processing jobs from DynamoDB
+router.get('/jobs', verifyToken, async (req, res) => {
     try {
-        const userJobs = processingJobs.filter(job => 
-            job.userId === req.user.userId || req.user.role === 'admin'
-        );
+        const result = await docClient.send(new QueryCommand({
+            TableName: JOBS_TABLE,
+            IndexName: 'UserIdIndex',
+            KeyConditionExpression: 'userId = :userId',
+            ExpressionAttributeValues: {
+                ':userId': req.user.userId.toString()
+            }
+        }));
         
-        res.json({ jobs: userJobs });
+        res.json({ jobs: result.Items || [] });
     } catch (error) {
         console.error('Get jobs error:', error);
         res.status(500).json({ error: 'Failed to fetch jobs' });
