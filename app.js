@@ -3,6 +3,8 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
+const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
+const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
 
 // Import routes
 const { router: authRoutes } = require('./routes/auth');
@@ -11,45 +13,133 @@ const processRoutes = require('./routes/process');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const AWS_REGION = process.env.AWS_REGION || 'ap-southeast-2';
 
-// Middleware
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// AWS clients
+const ssmClient = new SSMClient({ region: AWS_REGION });
+const secretsClient = new SecretsManagerClient({ region: AWS_REGION });
 
-// Ensure upload directories exist
-const dirs = ['uploads', 'processed', 'public'];
-dirs.forEach(dir => {
-    if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
+// Function to load parameter from Parameter Store
+async function getParameter(name) {
+    try {
+        const command = new GetParameterCommand({ Name: name });
+        const response = await ssmClient.send(command);
+        return response.Parameter.Value;
+    } catch (error) {
+        console.error(`❌ Failed to load parameter ${name}:`, error.message);
+        throw error;
     }
-});
+}
 
-// Routes
-app.use('/api/auth', authRoutes);
-app.use('/api/videos', videoRoutes);
-app.use('/api/process', processRoutes);
+// Function to load secret from Secrets Manager
+async function getSecret(secretId) {
+    try {
+        const command = new GetSecretValueCommand({ SecretId: secretId });
+        const response = await secretsClient.send(command);
+        return JSON.parse(response.SecretString);
+    } catch (error) {
+        console.error(`❌ Failed to load secret ${secretId}:`, error.message);
+        throw error;
+    }
+}
 
-// Serve processed videos statically
-app.use('/processed', express.static('processed'));
-app.use('/uploads', express.static('uploads'));
+// Load AWS configuration
+async function loadAWSConfig() {
+    console.log('🔧 Loading configuration from AWS...');
+    
+    try {
+        // Load from Parameter Store
+        const cognitoClientId = await getParameter('/n11676795/video-processor/cognito-client-id');
+        console.log('✅ Loaded Cognito Client ID from Parameter Store');
+        
+        // Load from Secrets Manager
+        const secrets = await getSecret('n11676795/video-processor/client-secret');
+        const cognitoClientSecret = secrets.client_secret;
+        console.log('✅ Loaded Cognito Client Secret from Secrets Manager');
+        
+        // Store in environment variables for use by routes
+        process.env.COGNITO_CLIENT_ID = cognitoClientId;
+        process.env.COGNITO_CLIENT_SECRET = cognitoClientSecret;
+        process.env.COGNITO_USER_POOL_ID = process.env.COGNITO_USER_POOL_ID || 'ap-southeast-2_PJpxeKlYZ';
+        
+        console.log('✅ Configuration loaded successfully');
+        console.log(`   - Client ID: ${cognitoClientId}`);
+        console.log(`   - Client Secret: ${'*'.repeat(cognitoClientSecret.length)} (hidden)`);
+        
+        return true;
+    } catch (error) {
+        console.error('❌ Failed to load AWS configuration:', error);
+        console.log('⚠️  Falling back to environment variables from .env file');
+        return false;
+    }
+}
 
-// Basic health check
-app.get('/', (req, res) => {
-    res.json({ 
-        message: 'Video Processing Service API',
-        status: 'running',
-        endpoints: [
-            'POST /api/auth/login',
-            'POST /api/videos/upload',
-            'GET /api/videos',
-            'POST /api/process/transcode/:videoId',
-            'GET /api/process/status/:jobId'
-        ]
+// Initialize app
+async function startApp() {
+    // Load AWS configuration first
+    await loadAWSConfig();
+    
+    // Middleware
+    app.use(cors());
+    app.use(express.json());
+    app.use(express.urlencoded({ extended: true }));
+
+    // Ensure upload directories exist
+    const dirs = ['uploads', 'processed', 'public'];
+    dirs.forEach(dir => {
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
     });
-});
 
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on port ${PORT}`);
-    console.log(`Access at: http://localhost:${PORT}`);
+    // Routes
+    app.use('/api/auth', authRoutes);
+    app.use('/api/videos', videoRoutes);
+    app.use('/api/process', processRoutes);
+
+    // Serve processed videos statically
+    app.use('/processed', express.static('processed'));
+    app.use('/uploads', express.static('uploads'));
+
+    // Basic health check
+    app.get('/', (req, res) => {
+        res.json({ 
+            message: 'Video Processing Service API',
+            status: 'running',
+            config_loaded_from_aws: !!process.env.COGNITO_CLIENT_SECRET,
+            endpoints: [
+                'POST /api/auth/login',
+                'POST /api/videos/upload',
+                'GET /api/videos',
+                'POST /api/process/transcode/:videoId',
+                'GET /api/process/status/:jobId'
+            ]
+        });
+    });
+
+    // Health check endpoint
+    app.get('/health', (req, res) => {
+        res.json({
+            status: 'healthy',
+            timestamp: new Date().toISOString(),
+            config: {
+                aws_region: AWS_REGION,
+                cognito_configured: !!(process.env.COGNITO_CLIENT_ID && process.env.COGNITO_CLIENT_SECRET),
+                parameters_loaded: !!process.env.COGNITO_CLIENT_ID,
+                secrets_loaded: !!process.env.COGNITO_CLIENT_SECRET
+            }
+        });
+    });
+
+    app.listen(PORT, '0.0.0.0', () => {
+        console.log(`✅ Server running on port ${PORT}`);
+        console.log(`📍 Access at: http://localhost:${PORT}`);
+        console.log(`🔍 Health check: http://localhost:${PORT}/health`);
+    });
+}
+
+// Start the application
+startApp().catch(error => {
+    console.error('❌ Failed to start application:', error);
+    process.exit(1);
 });
