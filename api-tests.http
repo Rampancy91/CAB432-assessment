@@ -1,8 +1,11 @@
+@baseUrl = http://54.153.171.61:3000
+@token = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjEsInVzZXJuYW1lIjoiYWRtaW4iLCJyb2xlIjoiYWRtaW4iLCJpYXQiOjE3NTk0ODUxODMsImV4cCI6MTc1OTU3MTU4M30.-ucawJmfXCQoU7N-zKVTyjeNJfUuu6jblw0EdILEA04
+
 ### Health Check
-GET http://localhost:3000/
+GET {{baseUrl}}/
 
 ### Login as Admin
-POST http://16.176.160.216:3000/api/auth/login
+POST {{baseUrl}}/api/auth/login
 Content-Type: application/json
 
 {
@@ -10,89 +13,35 @@ Content-Type: application/json
     "password": "admin123"
 }
 
-### Login as User
-POST http://localhost:3000/api/auth/login
-Content-Type: application/json
-
-{
-    "username": "user", 
-    "password": "user123"
-}
-
-### Upload Video
-POST http://localhost:3000/api/videos/upload
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjEsInVzZXJuYW1lIjoiYWRtaW4iLCJyb2xlIjoiYWRtaW4iLCJpYXQiOjE3NTkwMjg0ODIsImV4cCI6MTc1OTExNDg4Mn0.2dv3Q-TPKBW1N1kQCnb5UJmysZUWP5qQyvYZhlYzwgQ
+### Upload Video to S3
+POST {{baseUrl}}/api/videos/upload
+Authorization: Bearer {{token}}
 Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW
 
 ------WebKitFormBoundary7MA4YWxkTrZu0gW
-Content-Disposition: form-data; name="video"; filename="test-video.mp4"
+Content-Disposition: form-data; name="video"; filename="s3-test.mp4"
 Content-Type: video/mp4
 
-< ./test-video.mp4
+< ./s3-test.mp4
 ------WebKitFormBoundary7MA4YWxkTrZu0gW--
 
-### Start CPU-Intensive Video Transcoding
-POST http://localhost:3000/api/process/transcode/1
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjEsInVzZXJuYW1lIjoiYWRtaW4iLCJyb2xlIjoiYWRtaW4iLCJpYXQiOjE3NTkwMjg0ODIsImV4cCI6MTc1OTExNDg4Mn0.2dv3Q-TPKBW1N1kQCnb5UJmysZUWP5qQyvYZhlYzwgQ
+### Get User Videos
+GET {{baseUrl}}/api/videos
+Authorization: Bearer {{token}}
+
+### Start Transcoding (replace VIDEO_ID)
+POST {{baseUrl}}/api/process/transcode/1
+Authorization: Bearer {{token}}
 Content-Type: application/json
 
 {
-    "resolution": "1280x720",
-    "preset": "veryslow",
-    "crf": "18",
-    "videoBitrate": "2000k",
+    "resolution": "640x480",
+    "preset": "slow",
+    "crf": "23",
+    "videoBitrate": "1000k",
     "fps": 30
 }
 
-### Check Processing Status
-GET http://16.176.160.216:3000/api/process/status/2
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjEsInVzZXJuYW1lIjoiYWRtaW4iLCJyb2xlIjoiYWRtaW4iLCJpYXQiOjE3NTkwMzMwNDAsImV4cCI6MTc1OTExOTQ0MH0.Sxbx9w8e-WYierVpFBuWaVAeJAyfYOF5AvhGs68KFkY
-
-### Upload Longer Video
-POST http://localhost:3000/api/videos/upload
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjEsInVzZXJuYW1lIjoiYWRtaW4iLCJyb2xlIjoiYWRtaW4iLCJpYXQiOjE3NTkwMjg0ODIsImV4cCI6MTc1OTExNDg4Mn0.2dv3Q-TPKBW1N1kQCnb5UJmysZUWP5qQyvYZhlYzwgQ
-Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW
-
-------WebKitFormBoundary7MA4YWxkTrZu0gW
-Content-Disposition: form-data; name="video"; filename="long-test-video.mp4"
-Content-Type: video/mp4
-
-< ./long-test-video.mp4
-------WebKitFormBoundary7MA4YWxkTrZu0gW--
-
-### Start Job 1 - Very CPU Intensive
-POST http://16.176.160.216:3000/api/process/transcode/1
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjEsInVzZXJuYW1lIjoiYWRtaW4iLCJyb2xlIjoiYWRtaW4iLCJpYXQiOjE3NTkwMzMwNDAsImV4cCI6MTc1OTExOTQ0MH0.Sxbx9w8e-WYierVpFBuWaVAeJAyfYOF5AvhGs68KFkY
-Content-Type: application/json
-
-{
-    "resolution": "1920x1080",
-    "preset": "veryslow",
-    "crf": "16",
-    "videoBitrate": "5000k",
-    "fps": 60
-}
-
-### Upload Load Test Video-1
-POST http://16.176.160.216:3000/api/videos/upload
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjEsInVzZXJuYW1lIjoiYWRtaW4iLCJyb2xlIjoiYWRtaW4iLCJpYXQiOjE3NTkwNTUxNDYsImV4cCI6MTc1OTE0MTU0Nn0.mNcf3Cf1KZRiVE4cjVcMW3ebF00fJycSaG6HdyYnUq0
-Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW
-
-------WebKitFormBoundary7MA4YWxkTrZu0gW
-Content-Disposition: form-data; name="video"; filename="load-test-video-1.mp4"
-Content-Type: video/mp4
-
-< ./load-test-video-1.mp4
-------WebKitFormBoundary7MA4YWxkTrZu0gW--
-
-### Upload Real Video
-POST http://16.176.160.216:3000/api/videos/upload
-Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjEsInVzZXJuYW1lIjoiYWRtaW4iLCJyb2xlIjoiYWRtaW4iLCJpYXQiOjE3NTkwNTY2MDMsImV4cCI6MTc1OTE0MzAwM30.XAV-mOEoyF1Fij1sUmRQWnBGLYf7LSHGNxS27N0X5Js
-Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW
-
-------WebKitFormBoundary7MA4YWxkTrZu0gW
-Content-Disposition: form-data; name="video"; filename="simple-test.mp4"
-Content-Type: video/mp4
-
-< ./simple-test.mp4
-------WebKitFormBoundary7MA4YWxkTrZu0gW--
+### Check Job Status (replace JOB_ID)
+GET {{baseUrl}}/api/process/status/1
+Authorization: Bearer {{token}}

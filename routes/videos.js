@@ -1,16 +1,15 @@
 const express = require('express');
 const multer = require('multer');
 const path = require('path');
+const { v4: uuidv4 } = require('uuid');
 const { PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { PutCommand, GetCommand, QueryCommand, DeleteCommand } = require('@aws-sdk/lib-dynamodb');
 const { s3Client, BUCKET_NAME } = require('../utils/s3Client');
+const { docClient, VIDEOS_TABLE } = require('../utils/dynamoClient');
 const { verifyToken } = require('./auth');
 
 const router = express.Router();
 
-let videos = [];
-let videoIdCounter = 1;
-
-// Change to memory storage for S3
 const storage = multer.memoryStorage();
 
 const fileFilter = (req, file, cb) => {
@@ -29,37 +28,42 @@ const upload = multer({
     }
 });
 
-// Upload video to S3
+// Upload video to S3 and save metadata to DynamoDB
 router.post('/upload', verifyToken, upload.single('video'), async (req, res) => {
     try {
         if (!req.file) {
             return res.status(400).json({ error: 'No video file provided' });
         }
 
+        const videoId = uuidv4();
         const s3Key = `uploads/${req.user.userId}/${Date.now()}-${Math.round(Math.random() * 1E9)}${path.extname(req.file.originalname)}`;
 
+        // Upload to S3
         const uploadParams = {
             Bucket: BUCKET_NAME,
             Key: s3Key,
             Body: req.file.buffer,
             ContentType: req.file.mimetype
         };
-
         await s3Client.send(new PutObjectCommand(uploadParams));
 
+        // Save metadata to DynamoDB
         const videoMetadata = {
-            id: videoIdCounter++,
-            userId: req.user.userId,
+            videoId: videoId,
+            userId: req.user.userId.toString(),
             originalName: req.file.originalname,
             s3Key: s3Key,
             s3Bucket: BUCKET_NAME,
             size: req.file.size,
             mimetype: req.file.mimetype,
-            uploadedAt: new Date(),
+            uploadedAt: new Date().toISOString(),
             processedVersions: []
         };
 
-        videos.push(videoMetadata);
+        await docClient.send(new PutCommand({
+            TableName: VIDEOS_TABLE,
+            Item: videoMetadata
+        }));
 
         res.json({
             message: 'Video uploaded successfully',
@@ -72,31 +76,42 @@ router.post('/upload', verifyToken, upload.single('video'), async (req, res) => 
     }
 });
 
-// Get user's videos
-router.get('/', verifyToken, (req, res) => {
+// Get user's videos from DynamoDB
+router.get('/', verifyToken, async (req, res) => {
     try {
-        const userVideos = videos.filter(video => 
-            video.userId === req.user.userId || req.user.role === 'admin'
-        );
+        const params = {
+            TableName: VIDEOS_TABLE,
+            IndexName: 'UserIdIndex',
+            KeyConditionExpression: 'userId = :userId',
+            ExpressionAttributeValues: {
+                ':userId': req.user.userId.toString()
+            }
+        };
+
+        const result = await docClient.send(new QueryCommand(params));
         
-        res.json({ videos: userVideos });
+        res.json({ videos: result.Items || [] });
     } catch (error) {
         console.error('Get videos error:', error);
         res.status(500).json({ error: 'Failed to fetch videos' });
     }
 });
 
-// Get specific video
-router.get('/:videoId', verifyToken, (req, res) => {
+// Get specific video from DynamoDB
+router.get('/:videoId', verifyToken, async (req, res) => {
     try {
-        const videoId = parseInt(req.params.videoId);
-        const video = videos.find(v => v.id === videoId);
+        const result = await docClient.send(new GetCommand({
+            TableName: VIDEOS_TABLE,
+            Key: { videoId: req.params.videoId }
+        }));
+
+        const video = result.Item;
 
         if (!video) {
             return res.status(404).json({ error: 'Video not found' });
         }
 
-        if (video.userId !== req.user.userId && req.user.role !== 'admin') {
+        if (video.userId !== req.user.userId.toString() && req.user.role !== 'admin') {
             return res.status(403).json({ error: 'Access denied' });
         }
 
@@ -107,39 +122,43 @@ router.get('/:videoId', verifyToken, (req, res) => {
     }
 });
 
-// Delete video from S3
+// Delete video from S3 and DynamoDB
 router.delete('/:videoId', verifyToken, async (req, res) => {
     try {
-        const videoId = parseInt(req.params.videoId);
-        const videoIndex = videos.findIndex(v => v.id === videoId);
+        const result = await docClient.send(new GetCommand({
+            TableName: VIDEOS_TABLE,
+            Key: { videoId: req.params.videoId }
+        }));
 
-        if (videoIndex === -1) {
+        const video = result.Item;
+
+        if (!video) {
             return res.status(404).json({ error: 'Video not found' });
         }
 
-        const video = videos[videoIndex];
-
-        if (video.userId !== req.user.userId && req.user.role !== 'admin') {
+        if (video.userId !== req.user.userId.toString() && req.user.role !== 'admin') {
             return res.status(403).json({ error: 'Access denied' });
         }
 
         // Delete from S3
-        const deleteParams = {
+        await s3Client.send(new DeleteObjectCommand({
             Bucket: BUCKET_NAME,
             Key: video.s3Key
-        };
-        await s3Client.send(new DeleteObjectCommand(deleteParams));
+        }));
 
         // Delete processed versions
-        for (const processed of video.processedVersions) {
-            const deleteProcessed = {
+        for (const processed of (video.processedVersions || [])) {
+            await s3Client.send(new DeleteObjectCommand({
                 Bucket: BUCKET_NAME,
                 Key: processed.s3Key
-            };
-            await s3Client.send(new DeleteObjectCommand(deleteProcessed));
+            }));
         }
 
-        videos.splice(videoIndex, 1);
+        // Delete from DynamoDB
+        await docClient.send(new DeleteCommand({
+            TableName: VIDEOS_TABLE,
+            Key: { videoId: req.params.videoId }
+        }));
 
         res.json({ message: 'Video deleted successfully' });
     } catch (error) {
@@ -148,4 +167,4 @@ router.delete('/:videoId', verifyToken, async (req, res) => {
     }
 });
 
-module.exports = { router, videos };
+module.exports = router;
