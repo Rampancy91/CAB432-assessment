@@ -1,27 +1,60 @@
-const express = require('express');
+require('dotenv').config();
 const ffmpeg = require('fluent-ffmpeg');
 const fs = require('fs').promises;
 const fsSync = require('fs');
 const path = require('path');
-const { v4: uuidv4 } = require('uuid');
 const { GetObjectCommand, PutObjectCommand } = require('@aws-sdk/client-s3');
-const { PutCommand, GetCommand, QueryCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
-const { getS3Client, getBucketName } = require('../utils/s3Client');
-const { getDocClient, getTablesNames } = require('../utils/dynamoClient');
-const { verifyToken } = require('./auth');
+const { UpdateCommand } = require('@aws-sdk/lib-dynamodb');
+const { getS3Client, getBucketName } = require('./utils/s3Client');
+const { getDocClient, getTablesNames } = require('./utils/dynamoClient');
+const { receiveMessages, deleteMessage } = require('./utils/sqsClient');
+const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
+const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
 
-const router = express.Router();
+const AWS_REGION = process.env.AWS_REGION || 'ap-southeast-2';
+const ssmClient = new SSMClient({ region: AWS_REGION });
+const secretsClient = new SecretsManagerClient({ region: AWS_REGION });
 
-// Get initialized clients
-const getClients = () => {
-    return {
-        s3Client: getS3Client(),
-        BUCKET_NAME: getBucketName(),
-        docClient: getDocClient(),
-        VIDEOS_TABLE: getTablesNames().VIDEOS_TABLE,
-        JOBS_TABLE: getTablesNames().JOBS_TABLE
-    };
-};
+// Load parameter from Parameter Store
+async function getParameter(name) {
+    const command = new GetParameterCommand({ Name: name });
+    const response = await ssmClient.send(command);
+    return response.Parameter.Value;
+}
+
+// Load secret from Secrets Manager
+async function getSecret(secretId) {
+    const command = new GetSecretValueCommand({ SecretId: secretId });
+    const response = await secretsClient.send(command);
+    return JSON.parse(response.SecretString);
+}
+
+// Load AWS configuration
+async function loadAWSConfig() {
+    console.log('Loading worker configuration from AWS...');
+    
+    try {
+        const s3Bucket = await getParameter('/n11676795/video-processor/s3-bucket');
+        const videosTable = await getParameter('/n11676795/video-processor/videos-table');
+        const jobsTable = await getParameter('/n11676795/video-processor/jobs-table');
+        const queueUrl = await getParameter('/n11676795/video-processor/queue-url');
+        
+        process.env.S3_BUCKET_NAME = s3Bucket;
+        process.env.VIDEOS_TABLE = videosTable;
+        process.env.JOBS_TABLE = jobsTable;
+        process.env.QUEUE_URL = queueUrl;
+        
+        console.log('Worker configuration loaded successfully');
+        console.log(`  S3 Bucket: ${s3Bucket}`);
+        console.log(`  Jobs Table: ${jobsTable}`);
+        console.log(`  Queue URL: ${queueUrl}`);
+        
+        return true;
+    } catch (error) {
+        console.error('Failed to load AWS configuration:', error);
+        return false;
+    }
+}
 
 // Download from S3 to temp file
 async function downloadFromS3(s3Client, bucketName, s3Key, localPath) {
@@ -82,8 +115,12 @@ async function updateJobStatus(docClient, jobsTable, jobId, updates) {
 }
 
 // CPU-intensive processing function
-const transcodeVideo = async (s3InputKey, s3OutputKey, options, jobId) => {
-    const { s3Client, BUCKET_NAME, docClient, JOBS_TABLE } = getClients();
+async function transcodeVideo(s3InputKey, s3OutputKey, options, jobId) {
+    const s3Client = getS3Client();
+    const BUCKET_NAME = getBucketName();
+    const docClient = getDocClient();
+    const JOBS_TABLE = getTablesNames().JOBS_TABLE;
+    
     const tempDir = '/tmp';
     const tempInputPath = path.join(tempDir, `input-${jobId}.mp4`);
     const tempOutputPath = path.join(tempDir, `output-${jobId}.mp4`);
@@ -165,122 +202,63 @@ const transcodeVideo = async (s3InputKey, s3OutputKey, options, jobId) => {
 
         throw error;
     }
-};
+}
 
-const { sendMessage } = require('../utils/sqsClient');
-
-// Start video processing - send to queue
-router.post('/transcode/:videoId', verifyToken, async (req, res) => {
-    try {
-        const { docClient, VIDEOS_TABLE, JOBS_TABLE } = getClients();
-        const videoId = req.params.videoId;
-        
-        // Get video from DynamoDB
-        const videoResult = await docClient.send(new GetCommand({
-            TableName: VIDEOS_TABLE,
-            Key: { videoId }
-        }));
-
-        const video = videoResult.Item;
-
-        if (!video) {
-            return res.status(404).json({ error: 'Video not found' });
-        }
-
-        if (video.userId !== req.user.userId) {
-            return res.status(403).json({ error: 'Unauthorized' });
-        }
-
-        // Get processing options from request
-        const options = req.body || {};
-
-        // Create job ID and output key
-        const jobId = uuidv4();
-        const outputFilename = `processed-${Date.now()}.mp4`;
-        const s3OutputKey = `processed/${req.user.userId}/${outputFilename}`;
-
-        // Create job record in DynamoDB
-        await docClient.send(new PutCommand({
-            TableName: JOBS_TABLE,
-            Item: {
-                jobId,
-                videoId,
-                userId: req.user.userId,
-                status: 'queued',
-                s3InputKey: video.s3Key,
-                s3OutputKey,
-                options,
-                createdAt: new Date().toISOString(),
-                progress: 0
+// Main worker loop
+async function processQueue() {
+    console.log('Worker started. Polling for messages...');
+    
+    while (true) {
+        try {
+            // Receive messages from queue (long polling for 20 seconds)
+            const messages = await receiveMessages(1, 20);
+            
+            if (messages.length === 0) {
+                console.log('No messages. Continuing to poll...');
+                continue;
             }
-        }));
-
-        // Send job to SQS queue
-        await sendMessage({
-            jobId,
-            videoId,
-            userId: req.user.userId,
-            s3InputKey: video.s3Key,
-            s3OutputKey,
-            options
-        });
-
-        res.json({
-            message: 'Video processing job queued',
-            jobId,
-            status: 'queued'
-        });
-
-    } catch (error) {
-        console.error('Error queueing job:', error);
-        res.status(500).json({ error: 'Failed to queue processing job' });
-    }
-});
-
-// Get processing status from DynamoDB
-router.get('/status/:jobId', verifyToken, async (req, res) => {
-    try {
-        const { docClient, JOBS_TABLE } = getClients();
-        const result = await docClient.send(new GetCommand({
-            TableName: JOBS_TABLE,
-            Key: { jobId: req.params.jobId }
-        }));
-
-        const job = result.Item;
-
-        if (!job) {
-            return res.status(404).json({ error: 'Job not found' });
-        }
-
-        if (job.userId !== req.user.userId.toString() && req.user.role !== 'admin') {
-            return res.status(403).json({ error: 'Access denied' });
-        }
-
-        res.json({ job });
-    } catch (error) {
-        console.error('Get status error:', error);
-        res.status(500).json({ error: 'Failed to get job status' });
-    }
-});
-
-// Get all processing jobs from DynamoDB
-router.get('/jobs', verifyToken, async (req, res) => {
-    try {
-        const { docClient, JOBS_TABLE } = getClients();
-        const result = await docClient.send(new QueryCommand({
-            TableName: JOBS_TABLE,
-            IndexName: 'UserIdIndex',
-            KeyConditionExpression: 'userId = :userId',
-            ExpressionAttributeValues: {
-                ':userId': req.user.userId.toString()
+            
+            for (const message of messages) {
+                try {
+                    const job = JSON.parse(message.Body);
+                    console.log(`Received job: ${job.jobId}`);
+                    
+                    // Process the video
+                    await transcodeVideo(
+                        job.s3InputKey,
+                        job.s3OutputKey,
+                        job.options || {},
+                        job.jobId
+                    );
+                    
+                    console.log(`Job ${job.jobId} completed successfully`);
+                    
+                    // Delete message from queue
+                    await deleteMessage(message.ReceiptHandle);
+                    console.log(`Deleted message for job ${job.jobId}`);
+                    
+                } catch (error) {
+                    console.error('Error processing message:', error);
+                    // Message will become visible again after visibility timeout
+                }
             }
-        }));
-        
-        res.json({ jobs: result.Items || [] });
-    } catch (error) {
-        console.error('Get jobs error:', error);
-        res.status(500).json({ error: 'Failed to fetch jobs' });
+            
+        } catch (error) {
+            console.error('Error in worker loop:', error);
+            // Wait a bit before retrying
+            await new Promise(resolve => setTimeout(resolve, 5000));
+        }
     }
-});
+}
 
-module.exports = router;
+// Start the worker
+async function startWorker() {
+    await loadAWSConfig();
+    console.log('Starting video processing worker...');
+    await processQueue();
+}
+
+startWorker().catch(error => {
+    console.error('Worker failed to start:', error);
+    process.exit(1);
+});

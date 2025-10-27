@@ -58,7 +58,10 @@ async function loadAWSConfig() {
         const s3Bucket = await getParameter('/n11676795/video-processor/s3-bucket');
         const videosTable = await getParameter('/n11676795/video-processor/videos-table');
         const jobsTable = await getParameter('/n11676795/video-processor/jobs-table');
-        
+
+        // Load SQS
+        const queueUrl = await getParameter('/n11676795/video-processor/queue-url');
+
         // Store in environment variables for use by routes
         process.env.COGNITO_CLIENT_ID = cognitoClientId;
         process.env.COGNITO_CLIENT_SECRET = cognitoClientSecret;
@@ -66,6 +69,7 @@ async function loadAWSConfig() {
         process.env.S3_BUCKET_NAME = s3Bucket;
         process.env.VIDEOS_TABLE = videosTable;
         process.env.JOBS_TABLE = jobsTable;
+        process.env.QUEUE_URL = queueUrl;
         
         console.log('Configuration loaded successfully from AWS');
         console.log(`  S3 Bucket: ${s3Bucket}`);
@@ -74,6 +78,7 @@ async function loadAWSConfig() {
         console.log(`  Cognito User Pool: ${cognitoUserPoolId}`);
         console.log(`  Cognito Client ID: ${cognitoClientId}`);
         console.log(`  Client Secret: ${'*'.repeat(cognitoClientSecret.length)} (hidden)`);
+        console.log(`  Queue URL: ${queueUrl}`);
         
         return true;
     } catch (error) {
