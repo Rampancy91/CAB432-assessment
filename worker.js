@@ -251,9 +251,10 @@ async function processQueue() {
     }
 }
 
-// Start the worker
+//Start worker
 async function startWorker() {
     await loadAWSConfig();
+    console.log('DEBUG - Queue URL loaded:', process.env.QUEUE_URL);
     console.log('Starting video processing worker...');
     await processQueue();
 }
