@@ -9,3 +9,7 @@ processed/
 api-tests-new.http
 api-tests.http
 api-tests-DNS.http
+.terraform/
+*.tfstate*
+.terraform.lock.hcl
+terraform.exe
