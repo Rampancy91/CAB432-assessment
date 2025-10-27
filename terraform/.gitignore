@@ -1,6 +1,5 @@
 # Terraform generated files
 .terraform/
-*.tfstate
-*.tfstate.*
+*.tfstate*
 .terraform.lock.hcl
 terraform.exe
