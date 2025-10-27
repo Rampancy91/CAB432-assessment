@@ -29,7 +29,7 @@ async function getSecret(secretId) {
     return JSON.parse(response.SecretString);
 }
 
-// Load AWS configuration
+//Load AWS configuration
 async function loadAWSConfig() {
     console.log('Loading worker configuration from AWS...');
     
@@ -38,16 +38,19 @@ async function loadAWSConfig() {
         const videosTable = await getParameter('/n11676795/video-processor/videos-table');
         const jobsTable = await getParameter('/n11676795/video-processor/jobs-table');
         const queueUrl = await getParameter('/n11676795/video-processor/queue-url');
+        const dlqUrl = await getParameter('/n11676795/video-processor/dlq-url');  // ADD THIS
         
         process.env.S3_BUCKET_NAME = s3Bucket;
         process.env.VIDEOS_TABLE = videosTable;
         process.env.JOBS_TABLE = jobsTable;
         process.env.QUEUE_URL = queueUrl;
+        process.env.DLQ_URL = dlqUrl;  // ADD THIS
         
         console.log('Worker configuration loaded successfully');
         console.log(`  S3 Bucket: ${s3Bucket}`);
         console.log(`  Jobs Table: ${jobsTable}`);
         console.log(`  Queue URL: ${queueUrl}`);
+        console.log(`  DLQ URL: ${dlqUrl}`);  // ADD THIS
         
         return true;
     } catch (error) {
@@ -204,13 +207,75 @@ async function transcodeVideo(s3InputKey, s3OutputKey, options, jobId) {
     }
 }
 
+// Process messages from Dead Letter Queue
+async function processDLQ() {
+    const DLQ_URL = process.env.DLQ_URL;
+    
+    if (!DLQ_URL) {
+        console.log('DLQ URL not configured, skipping DLQ processing');
+        return;
+    }
+
+    console.log('Checking DLQ for failed messages...');
+    
+    const { receiveMessages, deleteMessage } = require('./utils/sqsClient');
+    const docClient = getDocClient();
+    const JOBS_TABLE = getTablesNames().JOBS_TABLE;
+    
+    // Temporarily override queue URL to read from DLQ
+    const originalQueueUrl = process.env.QUEUE_URL;
+    process.env.QUEUE_URL = DLQ_URL;
+    
+    try {
+        const messages = await receiveMessages(1, 5); // Short poll
+        
+        if (messages.length > 0) {
+            for (const message of messages) {
+                try {
+                    const job = JSON.parse(message.Body);
+                    console.log(`DLQ: Found failed job ${job.jobId}`);
+                    
+                    // Mark job as permanently failed in DynamoDB
+                    await updateJobStatus(docClient, JOBS_TABLE, job.jobId, {
+                        status: 'permanently_failed',
+                        error: 'Job failed after maximum retries (moved to DLQ)',
+                        failedAt: new Date().toISOString(),
+                        retriedCount: 3
+                    });
+                    
+                    console.log(`DLQ: Marked job ${job.jobId} as permanently failed in DynamoDB`);
+                    
+                    // Delete from DLQ after handling
+                    await deleteMessage(message.ReceiptHandle);
+                    console.log(`DLQ: Removed job ${job.jobId} from DLQ`);
+                    
+                } catch (error) {
+                    console.error('Error processing DLQ message:', error);
+                }
+            }
+        }
+    } finally {
+        // Restore original queue URL
+        process.env.QUEUE_URL = originalQueueUrl;
+    }
+}
+
 // Main worker loop
 async function processQueue() {
     console.log('Worker started. Polling for messages...');
     
+    let dlqCheckCounter = 0;
+    
     while (true) {
         try {
-            // Receive messages from queue (long polling for 20 seconds)
+            // Check DLQ every 10 iterations (~every 3-4 minutes)
+            if (dlqCheckCounter >= 10) {
+                await processDLQ();
+                dlqCheckCounter = 0;
+            }
+            dlqCheckCounter++;
+            
+            // Normal queue processing
             const messages = await receiveMessages(1, 20);
             
             if (messages.length === 0) {
@@ -239,13 +304,12 @@ async function processQueue() {
                     
                 } catch (error) {
                     console.error('Error processing message:', error);
-                    // Message will become visible again after visibility timeout
+                    // Don't delete - message will retry and eventually go to DLQ
                 }
             }
             
         } catch (error) {
             console.error('Error in worker loop:', error);
-            // Wait a bit before retrying
             await new Promise(resolve => setTimeout(resolve, 5000));
         }
     }
