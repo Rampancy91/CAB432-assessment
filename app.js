@@ -14,6 +14,7 @@ const processRoutes = require('./routes/process');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const AWS_REGION = process.env.AWS_REGION || 'ap-southeast-2';
+const URL = 'http://3.106.238.34:3000';
 
 // AWS clients
 const ssmClient = new SSMClient({ region: AWS_REGION });
@@ -79,7 +80,7 @@ async function loadAWSConfig() {
         console.log(`  Cognito Client ID: ${cognitoClientId}`);
         console.log(`  Client Secret: ${'*'.repeat(cognitoClientSecret.length)} (hidden)`);
         console.log(`  Queue URL: ${queueUrl}`);
-        
+
         return true;
     } catch (error) {
         console.error('Failed to load AWS configuration:', error);
@@ -147,8 +148,8 @@ async function startApp() {
 
     app.listen(PORT, '0.0.0.0', () => {
         console.log(`Server running on port ${PORT}`);
-        console.log(`Access at: http://54.153.171.61:${PORT}`);
-        console.log(`Health check: http://54.153.171.61:${PORT}/health`);
+        console.log(`Access at: ${URL}:${PORT}`);
+        console.log(`Health check: ${URL}:${PORT}/health`);
     });
 }
 
