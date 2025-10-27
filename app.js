@@ -14,7 +14,7 @@ const processRoutes = require('./routes/process');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const AWS_REGION = process.env.AWS_REGION || 'ap-southeast-2';
-const URL = 'http://3.106.238.34:3000';
+const URL = 'http://3.106.238.34';
 
 // AWS clients
 const ssmClient = new SSMClient({ region: AWS_REGION });
