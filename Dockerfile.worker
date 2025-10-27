@@ -1,0 +1,27 @@
+FROM ubuntu:24.04
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js 18
+RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
+    && apt-get install -y nodejs
+
+# Set working directory
+WORKDIR /app
+
+# Copy package.json and install dependencies
+COPY package*.json ./
+RUN npm install --production
+
+# Copy application code
+COPY . .
+
+# Worker doesn't need to expose ports or create upload directories
+# since it only processes from the queue
+
+# Start the worker
+CMD ["node", "worker.js"]
