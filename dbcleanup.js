@@ -1,5 +1,7 @@
+// Import from the right AWS SDK packages
 import pkg from "@aws-sdk/lib-dynamodb";
-const { DynamoDBClient, ScanCommand, DeleteCommand } = pkg;
+const { ScanCommand, DeleteCommand } = pkg;
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { S3Client, DeleteObjectCommand } from "@aws-sdk/client-s3";
 
 // 🔧 CONFIG — update these if needed
@@ -54,10 +56,12 @@ async function deleteAllVideos() {
 
         // Delete DynamoDB record
         try {
-          await db.send(new DeleteCommand({
-            TableName: TABLE,
-            Key: { videoId: video.videoId },
-          }));
+          await db.send(
+            new DeleteCommand({
+              TableName: TABLE,
+              Key: { videoId: video.videoId },
+            })
+          );
           totalDeleted++;
         } catch (dbErr) {
           console.warn(`⚠️  Failed to delete DynamoDB record for ${video.videoId}:`, dbErr.message);
