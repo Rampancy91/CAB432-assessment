@@ -1,6 +1,6 @@
 const axios = require('axios');
 
-const BASE_URL = 'http://3.106.238.34:3000'
+const BASE_URL = 'https://11676795.cab432.com'
 const USERNAME = 'testuser';
 const PASSWORD = 'TestPassword123!';
 
